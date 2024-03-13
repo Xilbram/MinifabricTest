@@ -1,0 +1,321 @@
+package main
+
+//Todo: Método queryWands, queryMateriais, TM, createWand
+
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"github.com/hyperledger/fabric-chaincode-go/shim"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+)
+
+type Material struct {
+	ObjectType string `json:"docType"`
+	Descricao  string `json:"descricao"`
+	Quantidade int    `json:"quantidade"`
+	Owner      string `json:"owner"`
+}
+
+type Wand struct {
+	ObjectType string `json:"docType"`
+	Materiais  []Material `json:"materiais"`
+	Quantidade int        `json:"quantidade"`
+	Owner      string     `json:"owner"`
+}
+
+
+// Chaincode Studio para transferencia de materiais e produção de varinhas
+type StudioChaincode struct {
+}
+
+// Método de inicialização da cadeia.
+func (cc *StudioChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+	return shim.Success(nil)
+}
+
+func (cc *StudioChaincode) initMaterial(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var err error
+	if len(args) != 4 {
+		return shim.Error("Incorrect number of arguments. Expecting 3: material description, quantity, owner ID")
+	}
+
+	descricao := args[0]
+	quantity, err := strconv.Atoi(args[1])
+	if err != nil {
+		return shim.Error("Quantidade deve ser um numero inteiro")
+	}
+	ownerID := args[2]
+
+
+	material := Material{
+		ObjectType: "material",
+		Descricao:  descricao,
+		Quantidade: quantity,
+		Owner:      ownerID,
+	}
+
+	materialBytes, err := json.Marshal(material)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize the material: %s", err.Error()))
+	}
+	err = stub.PutState(descricao, materialBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save the material: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+func (t *StudioChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+	fmt.Println("Invoke é chamado")
+	function, args := stub.GetFunctionAndParameters()
+	if function == "getMaterials" {
+		// Lista os materiais disponíveis na rede
+		return t.QueryMaterials(stub)
+	} else if function == "getWands" {
+		// Lista todas as varinhas produzidas na rede
+		return t.QueryWands(stub)
+	} else if function == "swapMaterials" {
+		// Troca materiais entre organizações
+		return t.TransferirMateriais(stub, args)
+	} else if function == "createWand" {
+		// Produz uma nova varinha
+		return t.CreateSingleWand(stub, args)
+	}else if function == "initMaterial" {
+		// Lista todas as varinhas produzidas na rede
+		return t.initMaterial(stub, args)
+	}
+
+	return shim.Error("Invalid invoke function name. Expecting \"getMaterials\",\"initMaterial\", \"getWands\", \"swapMaterials\", or \"createWand\"")
+}
+
+//Query materials retorna todos materiais disponiveis na ledger
+func (t *StudioChaincode) QueryMaterials(stub shim.ChaincodeStubInterface) pb.Response {
+	resultsIterator, err := stub.GetStateByPartialCompositeKey("material", []string{})
+	//resultsIterator, err := stub.GetStateByRange("", "")
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get materials: %s", err.Error()))
+	}
+	defer resultsIterator.Close()
+
+	var materials []Material
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to iterate over materials: %s", err.Error()))
+		}
+
+		var material Material
+		err = json.Unmarshal(queryResponse.Value, &material)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to deserialize material: %s", err.Error()))
+		}
+
+		materials = append(materials, material)
+	}
+
+	materialsBytes, err := json.Marshal(materials)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize materials: %s", err.Error()))
+	}
+
+	return shim.Success(materialsBytes)
+}
+
+//Query wands retorna todas varinhas disponiveis na ledger
+func (t *StudioChaincode) QueryWands(stub shim.ChaincodeStubInterface) pb.Response {
+	resultsIterator, err := stub.GetStateByPartialCompositeKey("wand", []string{})
+	//resultsIterator, err := stub.GetStateByRange("", "")
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Erro ao obter varinhas: %s", err.Error()))
+	}
+	defer resultsIterator.Close()
+
+	var wands []Wand
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Erro ao iterar sobre varinhas: %s", err.Error()))
+		}
+
+		var wand Wand
+		err = json.Unmarshal(queryResponse.Value, &wand)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Erro ao deserializar varinha: %s", err.Error()))
+		}
+
+		wands = append(wands, wand)
+	}
+
+	wandsBytes, err := json.Marshal(wands)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Erro ao serializar varinhas: %s", err.Error()))
+	}
+
+	return shim.Success(wandsBytes)
+}
+
+
+// Cria varinhas identificando 
+//A criação de varinhas combina 2 materiais em 1 varinha
+//O método pede o id de um owner, verifica os materiais associados ao ID dele e combina 2 materiais diferentes
+func (t *StudioChaincode) CreateSingleWand(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1: owner ID")
+	}
+
+	ownerID := args[0]
+
+	//resultsIterator, err := stub.GetStateByRange("", "")
+	resultsIterator, err := stub.GetStateByPartialCompositeKey("wand", []string{})
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get materials: %s", err.Error()))
+	}
+	defer resultsIterator.Close()
+
+	var ownerMaterials []Material
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to iterate over materials: %s", err.Error()))
+		}
+
+		var material Material
+		err = json.Unmarshal(queryResponse.Value, &material)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to deserialize material: %s", err.Error()))
+		}
+
+		// Check if the material belongs to the provided owner
+		if material.Owner == ownerID {
+			ownerMaterials = append(ownerMaterials, material)
+		}
+	}
+
+	// Check if the owner has at least two materials
+	if len(ownerMaterials) < 2 {
+		return shim.Error("Owner does not have enough materials to create a wand")
+	}
+
+	newWand := Wand{
+		ObjectType: "wand",
+		Materiais:  ownerMaterials[:2], 
+		Quantidade: 1,                 
+		Owner:      ownerID,
+	}
+
+	for _, material := range ownerMaterials[:2] {
+		material.Quantidade-- 
+		materialBytes, err := json.Marshal(material)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to serialize material %s: %s", material.Descricao, err.Error()))
+		}
+		err = stub.PutState(material.Descricao, materialBytes)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to update material %s: %s", material.Descricao, err.Error()))
+		}
+	}
+
+	// Serialize the new wand and save it to the ledger
+	newWandBytes, err := json.Marshal(newWand)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize the new wand: %s", err.Error()))
+	}
+	err = stub.PutState(ownerID+"_wand", newWandBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save the new wand: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+
+// TransferirMateriais permite a troca de materiais entre 2 orgs
+func (cc *StudioChaincode) TransferirMateriais(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 4 {
+		return shim.Error("Incorrect number of arguments. Expecting 4: sender ID, material description, quantity, receiver ID")
+	}
+
+	senderID := args[0]
+	materialDescription := args[1]
+	quantity, err := strconv.Atoi(args[2])
+	if err != nil {
+		return shim.Error("Quantity must be a valid integer")
+	}
+	receiverID := args[3]
+
+	// Retrieve the material owned by the sender
+	materialBytes, err := stub.GetState(materialDescription)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get material %s: %s", materialDescription, err.Error()))
+	}
+	if materialBytes == nil {
+		return shim.Error(fmt.Sprintf("Material %s not found", materialDescription))
+	}
+
+	var material Material
+	err = json.Unmarshal(materialBytes, &material)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to deserialize material %s: %s", materialDescription, err.Error()))
+	}
+
+	// Check if the sender owns the material
+	if material.Owner != senderID {
+		return shim.Error(fmt.Sprintf("Sender %s does not own material %s", senderID, materialDescription))
+	}
+
+	// Check if the sender has enough quantity of the material to transfer
+	if material.Quantidade < quantity {
+		return shim.Error(fmt.Sprintf("Insufficient quantity of material %s owned by sender %s", materialDescription, senderID))
+	}
+
+	// Update the quantity of the material for both sender and receiver
+	material.Quantidade -= quantity
+
+	// Save the updated material state for the sender
+	senderMaterialBytes, err := json.Marshal(material)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize material %s: %s", materialDescription, err.Error()))
+	}
+	err = stub.PutState(materialDescription, senderMaterialBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to update material %s for sender %s: %s", materialDescription, senderID, err.Error()))
+	}
+
+	// Retrieve the material owned by the receiver
+	receiverMaterialBytes, err := stub.GetState(materialDescription)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get material %s: %s", materialDescription, err.Error()))
+	}
+	var receiverMaterial Material
+	if receiverMaterialBytes != nil {
+		err = json.Unmarshal(receiverMaterialBytes, &receiverMaterial)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Failed to deserialize material %s: %s", materialDescription, err.Error()))
+		}
+	}
+
+	receiverMaterial.Quantidade += quantity
+	receiverMaterial.Owner = receiverID
+
+	// Save the updated material state for the receiver
+	receiverMaterialBytes, err = json.Marshal(receiverMaterial)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize material %s: %s", materialDescription, err.Error()))
+	}
+	err = stub.PutState(materialDescription, receiverMaterialBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to update material %s for receiver %s: %s", materialDescription, receiverID, err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+func main() {
+	err := shim.Start(new(StudioChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple chaincode: %s", err)
+	}
+}
