@@ -1,0 +1,530 @@
+package main
+
+//Todo: Método queryWands, queryMateriais, TM, createWand
+
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"github.com/hyperledger/fabric-chaincode-go/shim"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+)
+
+type Owner struct{
+	ObjectType string `json:"docType"`
+	Materiais  []Material `json:"materiais"`
+	Wands []Wand `json:"wands"`
+	Id string `json:"id"`
+}
+
+type Material struct {
+	ObjectType string `json:"docType"`
+	Descricao  string `json:"descricao"`
+	Quantidade int    `json:"quantidade"`
+	Owner      string `json:"owner"`
+}
+
+type Wand struct {
+	ObjectType string `json:"docType"`
+	Materiais  []Material `json:"materiais"`
+	Quantidade int        `json:"quantidade"`
+	Owner      string     `json:"owner"`
+}
+
+
+// Chaincode Studio para transferencia de materiais e produção de varinhas
+type StudioChaincode struct {
+}
+
+// Método de inicialização da cadeia.
+func (cc *StudioChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+	return shim.Success(nil)
+}
+
+func (t *StudioChaincode) QueryOwnerItems(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1: owner ID")
+	}
+
+	ownerID := args[0]
+
+	// Query all wands owned by the owner
+	wandsIterator, err := stub.GetStateByPartialCompositeKey("wand", []string{ownerID})
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error retrieving wands for owner %s: %s", ownerID, err.Error()))
+	}
+	defer wandsIterator.Close()
+
+	var ownerWands []Wand
+	for wandsIterator.HasNext() {
+		queryResponse, err := wandsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error iterating over wands for owner %s: %s", ownerID, err.Error()))
+		}
+
+		var wand Wand
+		err = json.Unmarshal(queryResponse.Value, &wand)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error deserializing wand for owner %s: %s", ownerID, err.Error()))
+		}
+
+		ownerWands = append(ownerWands, wand)
+	}
+
+	// Query all materials owned by the owner
+	materialsIterator, err := stub.GetStateByPartialCompositeKey("material", []string{ownerID})
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error retrieving materials for owner %s: %s", ownerID, err.Error()))
+	}
+	defer materialsIterator.Close()
+
+	var ownerMaterials []Material
+	for materialsIterator.HasNext() {
+		queryResponse, err := materialsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error iterating over materials for owner %s: %s", ownerID, err.Error()))
+		}
+
+		var material Material
+		err = json.Unmarshal(queryResponse.Value, &material)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error deserializing material for owner %s: %s", ownerID, err.Error()))
+		}
+
+		ownerMaterials = append(ownerMaterials, material)
+	}
+
+	// Combine wands and materials into a single data structure
+	type OwnerItems struct {
+		Wands    []Wand    `json:"wands"`
+		Materials []Material `json:"materials"`
+	}
+
+	ownerItems := OwnerItems{
+		Wands:    ownerWands,
+		Materials: ownerMaterials,
+	}
+
+	ownerItemsBytes, err := json.Marshal(ownerItems)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error serializing owner items for owner %s: %s", ownerID, err.Error()))
+	}
+
+	return shim.Success(ownerItemsBytes)
+}
+
+func (cc *StudioChaincode) initMaterial(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 3 {
+		return shim.Error("Incorrect number of arguments. Expecting 3: material description, quantity, owner ID")
+	}
+
+	descricao := args[0]
+	quantity, err := strconv.Atoi(args[1])
+	if err != nil {
+		return shim.Error("Quantidade deve ser um numero inteiro")
+	}
+	ownerID := args[2]
+
+	// Retrieve the owner from the ledger
+	ownerAsBytes, err := stub.GetState(ownerID)
+	if err != nil {
+		return shim.Error("Failed to get ownerId " + err.Error())
+	}
+	var owner Owner
+	err = json.Unmarshal(ownerAsBytes, &owner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to deserialize owner: %s", err.Error()))
+	}
+
+	// Create a new material
+	material := Material{
+		ObjectType: "material",
+		Descricao:  descricao,
+		Quantidade: quantity,
+		Owner:      ownerID,
+	}
+
+	// Add the new material to the owner's materials
+	owner.Materiais = append(owner.Materiais, material)
+
+	// Serialize the owner with the updated materials
+	ownerBytes, err := json.Marshal(owner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize the owner: %s", err.Error()))
+	}
+
+	// Put the updated owner back to the ledger
+	err = stub.PutState(ownerID, ownerBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save the owner: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+func (cc *StudioChaincode) initOwner(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var err error
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1: owner ID")
+	}
+
+	ownerID := args[0]
+	ownerAsBytes, err := stub.GetState(ownerID)
+	if err != nil {
+		return shim.Error("Failed to get ownerId " + err.Error())
+	}
+	if ownerAsBytes != nil{
+		return shim.Error("This owner already exists: " + ownerID)
+	}
+
+	var materials []Material
+	var wands []Wand
+
+	owner := Owner{
+		ObjectType: "owner",
+		Materiais: materials,
+		Wands: wands,
+		Id: ownerID,
+	}
+
+	ownerBytes, err := json.Marshal(owner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize the owner: %s", err.Error()))
+	}
+	err = stub.PutState(ownerID, ownerBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save the owner: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+func (t *StudioChaincode) Query(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1: owner ID")
+	}
+
+	ownerID := args[0]
+	ownerBytes, err := stub.GetState(ownerID)
+    if err != nil {
+		return shim.Error(fmt.Sprintf("Error retrieving owner %s", err.Error()))
+	}
+
+	return shim.Success(ownerBytes)
+}
+
+
+func (t *StudioChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+	fmt.Println("Invoke é chamado")
+	function, args := stub.GetFunctionAndParameters()
+	if function == "getMaterials" {
+		// Lista os materiais disponíveis na rede
+		return t.QueryMaterials(stub)
+	} else if function == "deleteMaterial" {
+		// Lista todas as varinhas produzidas na rede
+		return t.deleteMaterial(stub, args)
+	} else if function == "getWands" {
+		// Lista todas as varinhas produzidas na rede
+		return t.QueryWands(stub)
+	} else if function == "initOwner" {
+		// Produz uma nova varinha
+		return t.initOwner(stub, args)
+	}else if function == "swapMaterials" {
+		// Troca materiais entre organizações
+		return t.TransferirMateriais(stub, args)
+	} else if function == "Query" {
+		// Produz uma nova varinha
+		return t.Query(stub, args)
+	}else if function == "createWand" {
+		// Produz uma nova varinha
+		return t.CreateSingleWand(stub, args)
+	}else if function == "initMaterial" {
+		// Lista todas as varinhas produzidas na rede
+		return t.initMaterial(stub, args)
+	}
+
+	return shim.Error("Invalid invoke function name. Expecting \"getMaterials\",\"initMaterial\", \"getWands\", \"swapMaterials\", or \"createWand\"")
+}
+
+//Query materials retorna todos materiais disponiveis na ledger
+func (t *StudioChaincode) QueryMaterials(stub shim.ChaincodeStubInterface) pb.Response {
+	resultsIterator, err := stub.GetStateByRange("", "")
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error retrieving materials: %s", err.Error()))
+	}
+	defer resultsIterator.Close()
+
+	var allMaterialsWithOwner []struct {
+		Material Material `json:"material"`
+		Owner    string   `json:"owner"`
+	}
+
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error iterating over materials: %s", err.Error()))
+		}
+
+		var material Material
+		err = json.Unmarshal(queryResponse.Value, &material)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error deserializing material: %s", err.Error()))
+		}
+
+		if material.ObjectType == "material" {
+			owner, _, err := stub.SplitCompositeKey(queryResponse.Key)
+			if err != nil {
+				return shim.Error(fmt.Sprintf("Error extracting owner from composite key: %s", err.Error()))
+			}
+			allMaterialsWithOwner = append(allMaterialsWithOwner, struct {
+				Material Material `json:"material"`
+				Owner    string   `json:"owner"`
+			}{Material: material, Owner: owner})
+		}
+	}
+
+	materialsWithOwnerBytes, err := json.Marshal(allMaterialsWithOwner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error serializing materials with owner: %s", err.Error()))
+	}
+
+	return shim.Success(materialsWithOwnerBytes)
+}
+
+//Query wands retorna todas varinhas disponiveis na ledger
+func (t *StudioChaincode) QueryWands(stub shim.ChaincodeStubInterface) pb.Response {
+	resultsIterator, err := stub.GetStateByRange("", "")
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error retrieving wands: %s", err.Error()))
+	}
+	defer resultsIterator.Close()
+
+	var allWandsWithOwner []struct {
+		Wand  Wand   `json:"wand"`
+		Owner string `json:"owner"`
+	}
+
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error iterating over wands: %s", err.Error()))
+		}
+
+		var wand Wand
+		err = json.Unmarshal(queryResponse.Value, &wand)
+		if err != nil {
+			return shim.Error(fmt.Sprintf("Error deserializing wand: %s", err.Error()))
+		}
+
+		if wand.ObjectType == "wand" {
+			owner, _, err := stub.SplitCompositeKey(queryResponse.Key)
+			if err != nil {
+				return shim.Error(fmt.Sprintf("Error extracting owner from composite key: %s", err.Error()))
+			}
+			allWandsWithOwner = append(allWandsWithOwner, struct {
+				Wand  Wand   `json:"wand"`
+				Owner string `json:"owner"`
+			}{Wand: wand, Owner: owner})
+		}
+	}
+
+	wandsWithOwnerBytes, err := json.Marshal(allWandsWithOwner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Error serializing wands with owner: %s", err.Error()))
+	}
+
+	return shim.Success(wandsWithOwnerBytes)
+}
+
+
+// Cria varinhas identificando 
+//A criação de varinhas combina 2 materiais em 1 varinha
+//O método pede o id de um owner, verifica os materiais associados ao ID dele e combina 2 materiais diferentes
+func (t *StudioChaincode) CreateSingleWand(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1: owner ID")
+	}
+
+	ownerID := args[0]
+
+	// Retrieve the owner from the ledger
+	ownerAsBytes, err := stub.GetState(ownerID)
+	if err != nil {
+		return shim.Error("Failed to get owner " + err.Error())
+	}
+	if ownerAsBytes == nil {
+		return shim.Error("Owner does not exist: " + ownerID)
+	}
+	var owner Owner
+	err = json.Unmarshal(ownerAsBytes, &owner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to deserialize owner: %s", err.Error()))
+	}
+
+	// Check if the owner has at least two materials to create a wand
+	if len(owner.Materiais) < 2 {
+		return shim.Error("Owner does not have enough materials to create a wand")
+	}
+
+	// Create a new wand with the first two materials
+	newWand := Wand{
+		ObjectType: "wand",
+		Materiais:  owner.Materiais[:2],
+		Quantidade: 1,
+		Owner:      ownerID,
+	}
+
+	// Remove the used materials from the owner's materials
+	owner.Materiais = owner.Materiais[2:]
+
+	// Add the new wand to the owner's wands
+	owner.Wands = append(owner.Wands, newWand)
+
+	// Serialize the owner with the updated wands and materials
+	ownerBytes, err := json.Marshal(owner)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize the owner: %s", err.Error()))
+	}
+
+	// Put the updated owner back to the ledger
+	err = stub.PutState(ownerID, ownerBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save the owner: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+
+// TransferirMateriais permite a troca de materiais entre 2 orgs
+func (cc *StudioChaincode) TransferirMateriais(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 4 {
+		return shim.Error("Incorrect number of arguments. Expecting 4: sender ID, material description, quantity, receiver ID")
+	}
+
+	senderID := args[0]
+	materialDescription := args[1]
+	quantity, err := strconv.Atoi(args[2])
+	if err != nil {
+		return shim.Error("Quantity must be a valid integer")
+	}
+	receiverID := args[3]
+
+	// Retrieve the sender owner from the ledger
+	senderBytes, err := stub.GetState(senderID)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get sender owner: %s", err.Error()))
+	}
+	if senderBytes == nil {
+		return shim.Error(fmt.Sprintf("Sender owner not found: %s", senderID))
+	}
+	var sender Owner
+	err = json.Unmarshal(senderBytes, &sender)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to deserialize sender owner: %s", err.Error()))
+	}
+
+	// Retrieve the receiver owner from the ledger
+	receiverBytes, err := stub.GetState(receiverID)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to get receiver owner: %s", err.Error()))
+	}
+	if receiverBytes == nil {
+		return shim.Error(fmt.Sprintf("Receiver owner not found: %s", receiverID))
+	}
+	var receiver Owner
+	err = json.Unmarshal(receiverBytes, &receiver)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to deserialize receiver owner: %s", err.Error()))
+	}
+
+	// Find the material in the sender's materials
+	var foundMaterial *Material
+	for i, material := range sender.Materiais {
+		if material.Descricao == materialDescription {
+			foundMaterial = &sender.Materiais[i]
+			break
+		}
+	}
+	if foundMaterial == nil {
+		return shim.Error(fmt.Sprintf("Material %s not found in sender's materials", materialDescription))
+	}
+
+	// Check if the sender has enough quantity of the material to transfer
+	if foundMaterial.Quantidade < quantity {
+		return shim.Error(fmt.Sprintf("Insufficient quantity of material %s owned by sender %s", materialDescription, senderID))
+	}
+
+	// Reduce the quantity of the material from the sender's materials
+	foundMaterial.Quantidade -= quantity
+
+	// Find the material in the receiver's materials
+	var receiverMaterial *Material
+	for i, material := range receiver.Materiais {
+		if material.Descricao == materialDescription {
+			receiverMaterial = &receiver.Materiais[i]
+			break
+		}
+	}
+
+	// If the material exists in the receiver's materials, increase its quantity
+	if receiverMaterial != nil {
+		receiverMaterial.Quantidade += quantity
+	} else {
+		// If the material does not exist in the receiver's materials, add it
+		receiver.Materiais = append(receiver.Materiais, Material{
+			ObjectType: "material",
+			Descricao:  materialDescription,
+			Quantidade: quantity,
+			Owner:      receiverID,
+		})
+	}
+
+	// Serialize and save the updated sender's owner object
+	senderBytes, err = json.Marshal(sender)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize sender owner: %s", err.Error()))
+	}
+	err = stub.PutState(senderID, senderBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save updated sender owner: %s", err.Error()))
+	}
+
+	// Serialize and save the updated receiver's owner object
+	receiverBytes, err = json.Marshal(receiver)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to serialize receiver owner: %s", err.Error()))
+	}
+	err = stub.PutState(receiverID, receiverBytes)
+	if err != nil {
+		return shim.Error(fmt.Sprintf("Failed to save updated receiver owner: %s", err.Error()))
+	}
+
+	return shim.Success(nil)
+}
+
+// Deleta um material do ledger
+func (t *StudioChaincode) deleteMaterial(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	fmt.Println("delete method gets called")
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+
+	descricao := args[0]
+
+	// Delete the key from the state in ledger
+	err := stub.DelState(descricao)
+	if err != nil {
+		return shim.Error("Failed to delete state")
+	}
+
+	return shim.Success(nil)
+}
+
+func main() {
+	err := shim.Start(new(StudioChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple chaincode: %s", err)
+	}
+}
